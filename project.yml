@@ -1,0 +1,90 @@
+name: MusicPlay
+options:
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "14.0"
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    ENABLE_HARDENED_RUNTIME: NO
+    SWIFT_STRICT_CONCURRENCY: minimal
+targets:
+  MusicPlay:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: MusicPlay
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.local.musicplay
+        PRODUCT_NAME: MusicPlay
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        COMBINE_HIDPI_IMAGES: YES
+        GENERATE_INFOPLIST_FILE: NO
+    info:
+      path: MusicPlay/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: MusicPlay
+        LSApplicationCategoryType: public.app-category.music
+        LSMinimumSystemVersion: "14.0"
+        NSHighResolutionCapable: true
+        NSPrincipalClass: NSApplication
+  MusicPlayiPhone:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: MusicPlay/Models
+      - path: MusicPlay/Support/Formatters.swift
+      - path: MusicPlay/Services
+      - path: MusicPlay/Player
+      - path: MusicPlay/Views/Components
+      - path: MusicPlayiPhone
+        excludes:
+          - "Resources/Info.plist"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.local.musicplay.ios
+        PRODUCT_NAME: MusicPlay
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: ""
+        PROVISIONING_PROFILE_SPECIFIER: ""
+    info:
+      path: MusicPlayiPhone/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: MusicPlay
+        UILaunchScreen: {}
+        UIBackgroundModes:
+          - audio
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+schemes:
+  MusicPlay:
+    build:
+      targets:
+        MusicPlay: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+  MusicPlayiPhone:
+    build:
+      targets:
+        MusicPlayiPhone: all
+    run:
+      config: Debug
+    archive:
+      config: Release
