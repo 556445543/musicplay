@@ -1,9 +1,8 @@
 import AppKit
 import SwiftUI
 
-struct TrackListView: View {
+struct TrackListView: View, Equatable {
     @EnvironmentObject private var library: LibraryStore
-    @EnvironmentObject private var player: PlayerEngine
 
     let title: String
     let tracks: [Track]
@@ -11,7 +10,16 @@ struct TrackListView: View {
     let isLibraryEmpty: Bool
     let hasActiveSearch: Bool
     @Binding var searchText: String
+    @Binding var sort: TrackSort
+    let allowsSorting: Bool
+    let favoriteIDs: Set<String>
+    let currentTrackID: String?
+    let isPlaying: Bool
+    let emptyIcon: String
+    let emptyTitle: String
+    let emptyMessage: String
     let onPlay: (Track) -> Void
+    let onToggleFavorite: (Track) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -55,6 +63,30 @@ struct TrackListView: View {
 
             SearchField(text: $searchText)
 
+            if allowsSorting {
+                Menu {
+                    TrackSortMenuContent(sort: $sort)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.up.arrow.down")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(sort.option.label)
+                            .font(.system(size: 12))
+                        Image(systemName: sort.ascending ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(Capsule().fill(Color.primary.opacity(0.06)))
+                    .contentShape(Capsule())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("排序方式")
+            }
+
             Button {
                 Task { await library.refresh() }
             } label: {
@@ -92,9 +124,9 @@ struct TrackListView: View {
             )
         } else {
             EmptyStateView(
-                icon: "music.note",
-                title: "这里还没有歌曲",
-                message: "换一个文件夹，或点击右上角重新扫描资料库。"
+                icon: emptyIcon,
+                title: emptyTitle,
+                message: emptyMessage
             )
         }
     }
@@ -103,21 +135,79 @@ struct TrackListView: View {
         HStack(spacing: 12) {
             Text("#")
                 .frame(width: 24, alignment: .leading)
-            HStack(spacing: 10) {
-                Color.clear.frame(width: 34, height: 1)
-                Text("标题")
+
+            if allowsSorting {
+                Button {
+                    toggleSort(.title)
+                } label: {
+                    HStack(spacing: 10) {
+                        Color.clear.frame(width: 34, height: 1)
+                        sortLabel("标题", option: .title)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    toggleSort(.album)
+                } label: {
+                    sortLabel("专辑", option: .album)
+                        .frame(width: 170, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Color.clear.frame(width: 24, height: 1)
+
+                Button {
+                    toggleSort(.duration)
+                } label: {
+                    sortLabel("时长", option: .duration)
+                        .frame(width: 52, alignment: .trailing)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            } else {
+                HStack(spacing: 10) {
+                    Color.clear.frame(width: 34, height: 1)
+                    Text("标题")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Text("专辑")
+                    .frame(width: 170, alignment: .leading)
+
+                Color.clear.frame(width: 24, height: 1)
+
+                Text("时长")
+                    .frame(width: 52, alignment: .trailing)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Text("专辑")
-                .frame(width: 170, alignment: .leading)
-            Text("时长")
-                .frame(width: 52, alignment: .trailing)
         }
         .font(.system(size: 11, weight: .medium))
         .foregroundStyle(.tertiary)
         .padding(.horizontal, 24)
         .padding(.vertical, 7)
         .background(Color.primary.opacity(0.02))
+    }
+
+    private func sortLabel(_ title: String, option: TrackSortOption) -> some View {
+        HStack(spacing: 3) {
+            Text(title)
+            if sort.option == option {
+                Image(systemName: sort.ascending ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Color.accentColor)
+            }
+        }
+    }
+
+    private func toggleSort(_ option: TrackSortOption) {
+        if sort.option == option {
+            sort = TrackSort(option: option, ascending: !sort.ascending)
+        } else {
+            sort = TrackSort(option: option, ascending: option.preferredAscending)
+        }
     }
 
     private var trackList: some View {
@@ -127,14 +217,33 @@ struct TrackListView: View {
                     TrackRow(
                         index: index + 1,
                         track: track,
-                        isCurrent: player.currentTrack?.id == track.id,
-                        isPlaying: player.isPlaying && player.currentTrack?.id == track.id,
-                        onPlay: { onPlay(track) }
+                        isCurrent: currentTrackID == track.id,
+                        isPlaying: isPlaying && currentTrackID == track.id,
+                        isFavorite: favoriteIDs.contains(track.stableID),
+                        onPlay: { onPlay(track) },
+                        onToggleFavorite: { onToggleFavorite(track) }
                     )
                 }
             }
             .padding(.vertical, 6)
         }
+    }
+
+    static func == (lhs: TrackListView, rhs: TrackListView) -> Bool {
+        lhs.title == rhs.title
+            && lhs.tracks == rhs.tracks
+            && lhs.isScanning == rhs.isScanning
+            && lhs.isLibraryEmpty == rhs.isLibraryEmpty
+            && lhs.hasActiveSearch == rhs.hasActiveSearch
+            && lhs.searchText == rhs.searchText
+            && lhs.sort == rhs.sort
+            && lhs.allowsSorting == rhs.allowsSorting
+            && lhs.favoriteIDs == rhs.favoriteIDs
+            && lhs.currentTrackID == rhs.currentTrackID
+            && lhs.isPlaying == rhs.isPlaying
+            && lhs.emptyIcon == rhs.emptyIcon
+            && lhs.emptyTitle == rhs.emptyTitle
+            && lhs.emptyMessage == rhs.emptyMessage
     }
 }
 
@@ -143,7 +252,9 @@ private struct TrackRow: View {
     let track: Track
     let isCurrent: Bool
     let isPlaying: Bool
+    let isFavorite: Bool
     let onPlay: () -> Void
+    let onToggleFavorite: () -> Void
 
     @State private var isHovering = false
 
@@ -190,6 +301,17 @@ private struct TrackRow: View {
                 .lineLimit(1)
                 .frame(width: 170, alignment: .leading)
 
+            Button(action: onToggleFavorite) {
+                Image(systemName: isFavorite ? "heart.fill" : "heart")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(isFavorite ? Color.pink : Color.secondary.opacity(isHovering ? 0.9 : 0.5))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isFavorite ? "取消喜欢" : "喜欢")
+            .accessibilityLabel(isFavorite ? "取消喜欢" : "喜欢")
+
             Text(durationString(track.duration))
                 .font(.system(size: 12).monospacedDigit())
                 .foregroundStyle(.secondary)
@@ -208,6 +330,9 @@ private struct TrackRow: View {
         .contextMenu {
             Button("播放") {
                 onPlay()
+            }
+            Button(isFavorite ? "取消喜欢" : "喜欢") {
+                onToggleFavorite()
             }
             Button("在访达中显示") {
                 NSWorkspace.shared.activateFileViewerSelecting([track.url])
@@ -266,5 +391,6 @@ private struct SearchField: View {
         )
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onTapGesture { isFocused = true }
+        .help("支持歌名、歌手、专辑，也支持拼音和首字母，例如 zjl")
     }
 }

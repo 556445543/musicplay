@@ -4,14 +4,30 @@ import SwiftUI
 struct MusicPlayApp: App {
     @StateObject private var library = LibraryStore()
     @StateObject private var player = PlayerEngine()
+    @StateObject private var lyricsLibrary = LyricsLibrary()
+    @StateObject private var activity = LibraryActivityStore.shared
+    @StateObject private var lyricsOffsets = LyricsOffsetStore.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         Window("MusicPlay", id: "main") {
             ContentView()
                 .environmentObject(library)
                 .environmentObject(player)
+                .environmentObject(lyricsLibrary)
+                .environmentObject(activity)
+                .environmentObject(lyricsOffsets)
                 .frame(minWidth: 900, minHeight: 580)
-                .task { await library.refresh() }
+                .task {
+                    player.restoreLastSession(in: library.tracks)
+                    await library.refresh()
+                    player.restoreLastSession(in: library.tracks)
+                }
+                .task(id: library.folders) { lyricsLibrary.updateFolders(library.folders) }
+                .onChange(of: scenePhase) { _, phase in
+                    guard phase != .active else { return }
+                    player.saveSessionNow()
+                }
         }
         .defaultSize(width: 1120, height: 740)
         .commands {
@@ -22,7 +38,10 @@ struct MusicPlayApp: App {
                 .keyboardShortcut("o", modifiers: .command)
 
                 Button("重新扫描资料库") {
-                    Task { await library.refresh() }
+                    Task {
+                        await library.refresh()
+                        lyricsLibrary.refreshIndex()
+                    }
                 }
                 .keyboardShortcut("r", modifiers: .command)
             }

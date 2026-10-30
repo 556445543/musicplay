@@ -4,21 +4,42 @@ import UniformTypeIdentifiers
 struct MobileLibraryView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var player: PlayerEngine
+    @EnvironmentObject private var lyricsLibrary: LyricsLibrary
+    @EnvironmentObject private var activity: LibraryActivityStore
+    @EnvironmentObject private var lyricsOffsets: LyricsOffsetStore
 
     @State private var searchText = ""
     @State private var importMode: ImportMode = .files
     @State private var showImporter = false
     @State private var showNowPlaying = false
     @State private var feedback: ImportFeedback?
+    @AppStorage("mobileLibraryFilter") private var filterRaw = LibraryFilter.all.rawValue
+    @AppStorage(TrackSortStorage.optionKey) private var sortOptionRaw = TrackSortOption.title.rawValue
+    @AppStorage(TrackSortStorage.ascendingKey) private var sortAscending = true
 
-    private var visibleTracks: [Track] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return library.tracks }
-        return library.tracks.filter { track in
-            track.title.localizedCaseInsensitiveContains(query)
-                || track.artist.localizedCaseInsensitiveContains(query)
-                || track.album.localizedCaseInsensitiveContains(query)
+    private var filter: LibraryFilter {
+        get { LibraryFilter(rawValue: filterRaw) ?? .all }
+        nonmutating set { filterRaw = newValue.rawValue }
+    }
+
+    private var sort: TrackSort {
+        TrackSort(option: TrackSortOption(rawValue: sortOptionRaw) ?? .title, ascending: sortAscending)
+    }
+
+    private var baseTracks: [Track] {
+        switch filter {
+        case .all:
+            return library.tracks
+        case .favorites:
+            return library.tracks.filter { activity.isFavorite($0) }
+        case .recent:
+            let byID = Dictionary(library.tracks.map { ($0.stableID, $0) }, uniquingKeysWith: { first, _ in first })
+            return activity.recentTrackIDs.compactMap { byID[$0] }
         }
+    }
+
+    private var hasActiveSearch: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
@@ -26,10 +47,44 @@ struct MobileLibraryView: View {
             Group {
                 if library.tracks.isEmpty {
                     emptyLibrary
-                } else if visibleTracks.isEmpty {
-                    ContentUnavailableView.search(text: searchText)
                 } else {
-                    trackList
+                    VStack(spacing: 0) {
+                        filterBar
+
+                        if filter != .all && baseTracks.isEmpty && !hasActiveSearch {
+                            filterEmptyState
+                        } else {
+                            MobileTrackList(
+                                tracks: baseTracks,
+                                searchText: searchText,
+                                sort: sort,
+                                preservesOrder: filter == .recent,
+                                isScanning: library.isScanning,
+                                isImporting: library.isImporting,
+                                favoriteIDs: activity.favoriteIDs,
+                                currentTrackID: player.currentTrack?.id,
+                                isPlaying: player.isPlaying,
+                                onSortChange: { newValue in
+                                    sortOptionRaw = newValue.option.rawValue
+                                    sortAscending = newValue.ascending
+                                },
+                                onPlay: { track, queue in
+                                    player.play(track, in: queue)
+                                },
+                                onToggle: { track, queue in
+                                    player.togglePlayPause(fallbackQueue: queue)
+                                },
+                                onToggleFavorite: { track in
+                                    activity.toggleFavorite(track)
+                                },
+                                onRefresh: {
+                                    await library.refresh()
+                                    lyricsLibrary.refreshIndex()
+                                }
+                            )
+                            .equatable()
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -58,7 +113,10 @@ struct MobileLibraryView: View {
                             Label("如何导入音乐？", systemImage: "questionmark.circle")
                         }
                         Button {
-                            Task { await library.refresh() }
+                            Task {
+                                await library.refresh()
+                                lyricsLibrary.refreshIndex()
+                            }
                         } label: {
                             Label("重新扫描", systemImage: "arrow.clockwise")
                         }
@@ -73,7 +131,7 @@ struct MobileLibraryView: View {
             .searchable(
                 text: $searchText,
                 placement: .navigationBarDrawer(displayMode: .always),
-                prompt: "搜索歌曲、艺人或专辑"
+                prompt: "搜索歌名、艺人、专辑或拼音"
             )
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if player.currentTrack != nil {
@@ -114,6 +172,9 @@ struct MobileLibraryView: View {
                     } else {
                         count = await library.importFiles(urls)
                     }
+                    if count > 0 {
+                        lyricsLibrary.refreshIndex()
+                    }
                     showImportResult(count)
                 }
             case .failure(let error):
@@ -131,62 +192,63 @@ struct MobileLibraryView: View {
         .fullScreenCover(isPresented: $showNowPlaying) {
             MobileNowPlayingView()
                 .environmentObject(player)
+                .environmentObject(lyricsLibrary)
+                .environmentObject(activity)
+                .environmentObject(lyricsOffsets)
         }
     }
 
-    private var trackList: some View {
-        List {
-            Section {
-                ForEach(visibleTracks) { track in
-                    MobileTrackRow(
-                        track: track,
-                        isCurrent: player.currentTrack?.id == track.id,
-                        isPlaying: player.isPlaying && player.currentTrack?.id == track.id
+    private var filterBar: some View {
+        HStack(spacing: 8) {
+            ForEach(LibraryFilter.allCases) { item in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        filter = item
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: item.icon)
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(item.title)
+                            .font(.footnote.weight(.medium))
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(height: 30)
+                    .background(
+                        Capsule().fill(
+                            filter == item
+                                ? Color.accentColor.opacity(0.15)
+                                : Color(.secondarySystemBackground)
+                        )
                     )
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        play(track)
-                    }
-                    .contextMenu {
-                        Button {
-                            player.play(track, in: visibleTracks)
-                        } label: {
-                            Label("播放", systemImage: "play.fill")
-                        }
-                        if player.currentTrack?.id == track.id {
-                            Button {
-                                player.togglePlayPause(fallbackQueue: visibleTracks)
-                            } label: {
-                                Label(
-                                    player.isPlaying ? "暂停" : "继续播放",
-                                    systemImage: player.isPlaying ? "pause.fill" : "play.fill"
-                                )
-                            }
-                        }
-                    }
-                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(rowBackground(for: track))
+                    .foregroundStyle(filter == item ? Color.accentColor : Color.secondary)
+                    .contentShape(Capsule())
                 }
-            } header: {
-                HStack(spacing: 6) {
-                    Text("\(visibleTracks.count) 首歌曲")
-                    if library.isScanning || library.isImporting {
-                        ProgressView()
-                            .controlSize(.mini)
-                        Text(library.isImporting ? "正在导入…" : "正在扫描…")
-                    }
-                    Spacer(minLength: 0)
-                }
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .textCase(nil)
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(filter == item ? .isSelected : [])
             }
+
+            Spacer(minLength: 0)
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .refreshable {
-            await library.refresh()
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+        .padding(.bottom, 2)
+    }
+
+    @ViewBuilder
+    private var filterEmptyState: some View {
+        if filter == .favorites {
+            ContentUnavailableView {
+                Label("还没有喜欢的歌曲", systemImage: "heart")
+            } description: {
+                Text("点歌曲右侧的爱心，或在歌曲上左滑、长按即可收藏。")
+            }
+        } else {
+            ContentUnavailableView {
+                Label("还没有播放记录", systemImage: "clock.arrow.circlepath")
+            } description: {
+                Text("播放过的歌曲会按时间顺序出现在这里。")
+            }
         }
     }
 
@@ -282,20 +344,6 @@ struct MobileLibraryView: View {
         .padding(.top, 10)
     }
 
-    private func rowBackground(for track: Track) -> Color {
-        player.currentTrack?.id == track.id
-            ? Color.accentColor.opacity(0.09)
-            : Color(.systemBackground)
-    }
-
-    private func play(_ track: Track) {
-        if player.currentTrack?.id == track.id {
-            player.togglePlayPause(fallbackQueue: visibleTracks)
-        } else {
-            player.play(track, in: visibleTracks)
-        }
-    }
-
     private func beginImport(_ mode: ImportMode) {
         importMode = mode
         showImporter = true
@@ -312,6 +360,233 @@ struct MobileLibraryView: View {
                 title: "没有可导入的歌曲",
                 message: "请选择 MP3、M4A、FLAC、WAV 或 AIFF 格式的音频文件。"
             )
+        }
+    }
+}
+
+private struct MobileTrackList: View, Equatable {
+    let tracks: [Track]
+    let searchText: String
+    let sort: TrackSort
+    let preservesOrder: Bool
+    let isScanning: Bool
+    let isImporting: Bool
+    let favoriteIDs: Set<String>
+    let currentTrackID: String?
+    let isPlaying: Bool
+    let onSortChange: (TrackSort) -> Void
+    let onPlay: (Track, [Track]) -> Void
+    let onToggle: (Track, [Track]) -> Void
+    let onToggleFavorite: (Track) -> Void
+    let onRefresh: () async -> Void
+
+    private var query: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var sortBinding: Binding<TrackSort> {
+        Binding(get: { sort }, set: onSortChange)
+    }
+
+    var body: some View {
+        let visibleTracks = Self.filteredTracks(tracks, query: query, sort: sort, preservesOrder: preservesOrder)
+
+        if visibleTracks.isEmpty && !query.isEmpty {
+            ContentUnavailableView.search(text: searchText)
+        } else {
+            let grouped = !preservesOrder && sort.option.supportsInitialIndex
+            let sections = preservesOrder
+                ? [TrackSection(id: "order", tracks: visibleTracks)]
+                : TrackSorter.sections(visibleTracks, by: sort)
+            let showsIndex = grouped && query.isEmpty && sections.count > 1
+
+            VStack(spacing: 0) {
+                listHeader(count: visibleTracks.count)
+
+                ScrollViewReader { proxy in
+                    List {
+                        ForEach(sections) { section in
+                            Section {
+                                ForEach(Array(section.tracks.enumerated()), id: \.element.id) { index, track in
+                                    trackRow(track, queue: visibleTracks, showsIndex: showsIndex)
+                                        .id(index == 0 && grouped ? "letter-\(section.id)" : track.id)
+                                }
+                            } header: {
+                                if grouped {
+                                    Text(section.id)
+                                        .font(.footnote.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .textCase(nil)
+                                        .padding(.leading, 2)
+                                }
+                            }
+                        }
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .refreshable {
+                        await onRefresh()
+                    }
+                    .overlay(alignment: .trailing) {
+                        if showsIndex {
+                            AlphabetIndexBar(letters: sections.map(\.id)) { letter in
+                                withAnimation(.easeInOut(duration: 0.18)) {
+                                    proxy.scrollTo("letter-\(letter)", anchor: .top)
+                                }
+                            }
+                            .padding(.vertical, 16)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func listHeader(count: Int) -> some View {
+        HStack(spacing: 6) {
+            Text("\(count) 首歌曲")
+            if isScanning || isImporting {
+                ProgressView()
+                    .controlSize(.mini)
+                Text(isImporting ? "正在导入…" : "正在扫描…")
+            }
+
+            Spacer(minLength: 8)
+
+            if !preservesOrder {
+                Menu {
+                    TrackSortMenuContent(sort: sortBinding)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up.arrow.down")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(sort.option.label)
+                        Image(systemName: sort.ascending ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(Capsule().fill(Color(.secondarySystemBackground)))
+                    .contentShape(Capsule())
+                }
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .accessibilityLabel("排序方式")
+            }
+        }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(Color(.systemBackground))
+    }
+
+    private func trackRow(_ track: Track, queue: [Track], showsIndex: Bool) -> some View {
+        MobileTrackRow(
+            track: track,
+            isCurrent: currentTrackID == track.id,
+            isPlaying: isPlaying && currentTrackID == track.id,
+            isFavorite: favoriteIDs.contains(track.stableID),
+            onToggleFavorite: { onToggleFavorite(track) }
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if currentTrackID == track.id {
+                onToggle(track, queue)
+            } else {
+                onPlay(track, queue)
+            }
+        }
+        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+            Button {
+                onToggleFavorite(track)
+            } label: {
+                Label(
+                    favoriteIDs.contains(track.stableID) ? "取消喜欢" : "喜欢",
+                    systemImage: favoriteIDs.contains(track.stableID) ? "heart.slash.fill" : "heart.fill"
+                )
+            }
+            .tint(.pink)
+        }
+        .contextMenu {
+            Button {
+                onPlay(track, queue)
+            } label: {
+                Label("播放", systemImage: "play.fill")
+            }
+            if currentTrackID == track.id {
+                Button {
+                    onToggle(track, queue)
+                } label: {
+                    Label(
+                        isPlaying ? "暂停" : "继续播放",
+                        systemImage: isPlaying ? "pause.fill" : "play.fill"
+                    )
+                }
+            }
+            Button {
+                onToggleFavorite(track)
+            } label: {
+                Label(
+                    favoriteIDs.contains(track.stableID) ? "取消喜欢" : "喜欢",
+                    systemImage: favoriteIDs.contains(track.stableID) ? "heart.slash" : "heart"
+                )
+            }
+        }
+        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: showsIndex ? 30 : 16))
+        .listRowSeparator(.hidden)
+        .listRowBackground(
+            currentTrackID == track.id
+                ? Color.accentColor.opacity(0.09)
+                : Color(.systemBackground)
+        )
+    }
+
+    private static func filteredTracks(_ tracks: [Track], query: String, sort: TrackSort, preservesOrder: Bool) -> [Track] {
+        let filtered: [Track]
+        if query.isEmpty {
+            filtered = tracks
+        } else {
+            filtered = tracks.filter { TrackSearch.matches($0, query: query) }
+        }
+        return preservesOrder ? filtered : TrackSorter.sorted(filtered, by: sort)
+    }
+
+    static func == (lhs: MobileTrackList, rhs: MobileTrackList) -> Bool {
+        lhs.tracks == rhs.tracks
+            && lhs.searchText == rhs.searchText
+            && lhs.sort == rhs.sort
+            && lhs.preservesOrder == rhs.preservesOrder
+            && lhs.isScanning == rhs.isScanning
+            && lhs.isImporting == rhs.isImporting
+            && lhs.favoriteIDs == rhs.favoriteIDs
+            && lhs.currentTrackID == rhs.currentTrackID
+            && lhs.isPlaying == rhs.isPlaying
+    }
+}
+
+private enum LibraryFilter: String, CaseIterable, Identifiable {
+    case all
+    case favorites
+    case recent
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: return "全部"
+        case .favorites: return "喜欢"
+        case .recent: return "最近"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .all: return "music.note.list"
+        case .favorites: return "heart.fill"
+        case .recent: return "clock.arrow.circlepath"
         }
     }
 }
@@ -345,6 +620,8 @@ private struct MobileTrackRow: View {
     let track: Track
     let isCurrent: Bool
     let isPlaying: Bool
+    let isFavorite: Bool
+    let onToggleFavorite: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -383,6 +660,16 @@ private struct MobileTrackRow: View {
                     .font(.system(size: 12).monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
+
+            Button(action: onToggleFavorite) {
+                Image(systemName: isFavorite ? "heart.fill" : "heart")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(isFavorite ? Color.pink : Color.secondary)
+                    .frame(width: 38, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isFavorite ? "取消喜欢" : "喜欢")
         }
         .padding(.vertical, 2)
     }

@@ -29,6 +29,7 @@ final class PlayerEngine: NSObject, ObservableObject {
 
     @Published var shuffleEnabled = false {
         didSet {
+            UserDefaults.standard.set(shuffleEnabled, forKey: Self.shuffleKey)
             if shuffleEnabled {
                 prepareShuffleOrder(startingAt: currentIndex)
             } else {
@@ -37,27 +38,51 @@ final class PlayerEngine: NSObject, ObservableObject {
         }
     }
 
-    @Published var repeatMode: RepeatMode = .off
+    @Published var repeatMode: RepeatMode = .off {
+        didSet {
+            UserDefaults.standard.set(repeatMode.rawValue, forKey: Self.repeatKey)
+        }
+    }
 
     private static let volumeKey = "playerVolume"
+    private static let shuffleKey = "playerShuffleEnabled"
+    private static let repeatKey = "playerRepeatMode"
+    private static let sessionKey = "playbackSession"
+
+    private struct PlaybackSession: Codable {
+        var trackID: String
+        var queueIDs: [String]
+        var time: TimeInterval
+        var wasPlaying: Bool?
+    }
 
     private var player: AVAudioPlayer?
     private var queue: [Track] = []
     private var currentIndex: Int?
     private var shuffleOrder: [Int] = []
     private var ticker: Timer?
+    private var hasRestoredSession = false
+    private var lastSessionSave = Date.distantPast
     #if os(iOS)
     private var audioObservers: [NSObjectProtocol] = []
     private var wasPlayingBeforeInterruption = false
+    private var favoriteObserver: AnyCancellable?
     #endif
 
     override init() {
-        let saved = UserDefaults.standard.object(forKey: Self.volumeKey) as? Double ?? 0.7
-        volume = min(max(saved, 0), 1)
+        let defaults = UserDefaults.standard
+        volume = min(max(defaults.object(forKey: Self.volumeKey) as? Double ?? 0.7, 0), 1)
+        shuffleEnabled = defaults.bool(forKey: Self.shuffleKey)
+        repeatMode = RepeatMode(rawValue: defaults.string(forKey: Self.repeatKey) ?? "") ?? .off
         super.init()
         #if os(iOS)
         configureAudioSession()
         configureRemoteCommands()
+        favoriteObserver = LibraryActivityStore.shared.$favoriteIDs
+            .dropFirst()
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.updateNowPlayingInfo() }
+            }
         #endif
     }
 
@@ -93,14 +118,19 @@ final class PlayerEngine: NSObject, ObservableObject {
                 player.pause()
                 isPlaying = false
                 stopTicker()
+                saveSession()
             } else {
                 if player.currentTime >= player.duration - 0.1 {
                     player.currentTime = 0
                     currentTime = 0
                 }
+                #if os(iOS)
+                try? AVAudioSession.sharedInstance().setActive(true)
+                #endif
                 if player.play() {
                     isPlaying = true
                     startTicker()
+                    saveSession()
                 }
             }
             updateNowPlayingInfo()
@@ -153,6 +183,7 @@ final class PlayerEngine: NSObject, ObservableObject {
         player.currentTime = clamped
         currentTime = clamped
         updateNowPlayingInfo()
+        saveSession()
     }
 
     private func startPlayback(at index: Int) {
@@ -183,6 +214,8 @@ final class PlayerEngine: NSObject, ObservableObject {
             isPlaying = true
             errorMessage = nil
             startTicker()
+            LibraryActivityStore.shared.recordPlay(track)
+            saveSession()
         } catch {
             currentTrack = track
             duration = track.duration
@@ -239,6 +272,85 @@ final class PlayerEngine: NSObject, ObservableObject {
         shuffleOrder = order
     }
 
+    // MARK: - Session
+
+    func saveSessionNow() {
+        saveSession()
+    }
+
+    func restoreLastSession(in tracks: [Track]) {
+        guard !hasRestoredSession, currentTrack == nil else { return }
+        guard !tracks.isEmpty else { return }
+        guard let data = UserDefaults.standard.data(forKey: Self.sessionKey) else {
+            hasRestoredSession = true
+            return
+        }
+        guard let session = try? JSONDecoder().decode(PlaybackSession.self, from: data) else {
+            hasRestoredSession = true
+            return
+        }
+        guard let track = tracks.first(where: { $0.stableID == session.trackID }) else { return }
+
+        let byID = Dictionary(tracks.map { ($0.stableID, $0) }, uniquingKeysWith: { first, _ in first })
+        var restoredQueue = session.queueIDs.compactMap { byID[$0] }
+        if restoredQueue.isEmpty {
+            restoredQueue = tracks
+        }
+
+        let index: Int
+        if let existing = restoredQueue.firstIndex(where: { $0.id == track.id }) {
+            index = existing
+        } else {
+            restoredQueue.insert(track, at: 0)
+            index = 0
+        }
+
+        do {
+            let restoredPlayer = try AVAudioPlayer(contentsOf: track.url)
+            restoredPlayer.delegate = self
+            restoredPlayer.volume = Float(volume)
+            restoredPlayer.prepareToPlay()
+            let maxTime = max(restoredPlayer.duration - 1, 0)
+            restoredPlayer.currentTime = min(max(session.time, 0), maxTime)
+
+            queue = restoredQueue
+            currentIndex = index
+            player = restoredPlayer
+            currentTrack = track
+            duration = restoredPlayer.duration
+            currentTime = restoredPlayer.currentTime
+            isPlaying = false
+            hasRestoredSession = true
+
+            // 和网易云一致：上次是在播放中被打断的，打开 App 后接着放；主动暂停的不自动播。
+            if session.wasPlaying == true {
+                #if os(iOS)
+                try? AVAudioSession.sharedInstance().setActive(true)
+                #endif
+                if restoredPlayer.play() {
+                    isPlaying = true
+                    startTicker()
+                }
+            }
+            updateNowPlayingInfo()
+        } catch {
+            // 文件暂时不可用（例如移动硬盘未挂载），等扫描完成后再试。
+        }
+    }
+
+    private func saveSession() {
+        guard let track = currentTrack else { return }
+        let session = PlaybackSession(
+            trackID: track.stableID,
+            queueIDs: queue.map(\.stableID),
+            time: currentTime,
+            wasPlaying: isPlaying
+        )
+        guard let data = try? JSONEncoder().encode(session) else { return }
+        UserDefaults.standard.set(data, forKey: Self.sessionKey)
+        lastSessionSave = Date()
+    }
+
     private func handleTrackFinished() {
         guard let currentIndex else { return }
 
@@ -253,6 +365,7 @@ final class PlayerEngine: NSObject, ObservableObject {
             isPlaying = false
             currentTime = duration
             stopTicker()
+            saveSession()
             updateNowPlayingInfo()
         }
     }
@@ -271,6 +384,9 @@ final class PlayerEngine: NSObject, ObservableObject {
     private func tick() {
         guard let player, isPlaying else { return }
         currentTime = player.currentTime
+        if Date().timeIntervalSince(lastSessionSave) > 5 {
+            saveSession()
+        }
     }
 
     private func stopTicker() {
@@ -302,6 +418,7 @@ final class PlayerEngine: NSObject, ObservableObject {
             info[MPMediaItemPropertyAlbumTitle] = track.album
         }
         center.nowPlayingInfo = info
+        MPRemoteCommandCenter.shared().likeCommand.isActive = LibraryActivityStore.shared.isFavorite(track)
 
         let trackID = track.id
         let url = track.url
@@ -351,6 +468,9 @@ final class PlayerEngine: NSObject, ObservableObject {
         center.nextTrackCommand.isEnabled = true
         center.previousTrackCommand.isEnabled = true
         center.changePlaybackPositionCommand.isEnabled = true
+        center.likeCommand.isEnabled = true
+        center.likeCommand.localizedTitle = "喜欢"
+        center.likeCommand.localizedShortTitle = "喜欢"
 
         center.playCommand.addTarget { [weak self] _ in
             Task { @MainActor in self?.resumePlayback() }
@@ -379,6 +499,14 @@ final class PlayerEngine: NSObject, ObservableObject {
             Task { @MainActor in self?.seek(to: event.positionTime) }
             return .success
         }
+        center.likeCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let track = self.currentTrack else { return }
+                LibraryActivityStore.shared.toggleFavorite(track)
+                self.updateNowPlayingInfo()
+            }
+            return .success
+        }
     }
 
     private func resumePlayback() {
@@ -392,6 +520,7 @@ final class PlayerEngine: NSObject, ObservableObject {
             isPlaying = true
             startTicker()
             updateNowPlayingInfo()
+            saveSession()
         }
     }
 
@@ -401,6 +530,7 @@ final class PlayerEngine: NSObject, ObservableObject {
         isPlaying = false
         stopTicker()
         updateNowPlayingInfo()
+        saveSession()
     }
 
     private func handleAudioInterruption(_ notification: Notification) {

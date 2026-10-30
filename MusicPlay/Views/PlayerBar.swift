@@ -2,7 +2,9 @@ import SwiftUI
 
 struct PlayerBar: View {
     @EnvironmentObject private var player: PlayerEngine
+    @EnvironmentObject private var activity: LibraryActivityStore
     let fallbackQueue: [Track]
+    @Binding var showLyrics: Bool
 
     @State private var scrubTime: Double?
 
@@ -56,7 +58,38 @@ struct PlayerBar: View {
             }
 
             Spacer(minLength: 0)
+
+            Button {
+                guard let track = player.currentTrack else { return }
+                activity.toggleFavorite(track)
+            } label: {
+                Image(systemName: isCurrentFavorite ? "heart.fill" : "heart")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(isCurrentFavorite ? Color.pink : Color.secondary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(player.currentTrack == nil)
+            .help(isCurrentFavorite ? "取消喜欢" : "喜欢")
+            .accessibilityLabel(isCurrentFavorite ? "取消喜欢" : "喜欢")
+
+            Button {
+                showLyrics.toggle()
+            } label: {
+                Image(systemName: "quote.bubble")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(showLyrics ? Color.accentColor : Color.secondary)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(showLyrics ? "隐藏歌词" : "显示歌词")
         }
+    }
+
+    private var isCurrentFavorite: Bool {
+        player.currentTrack.map { activity.isFavorite($0) } ?? false
     }
 
     private var subtitle: String {

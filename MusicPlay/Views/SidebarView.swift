@@ -3,11 +3,14 @@ import SwiftUI
 
 enum SidebarItem: Hashable {
     case allTracks
+    case favorites
+    case recent
     case folder(URL)
 }
 
 struct SidebarView: View {
     @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var activity: LibraryActivityStore
     @Binding var selection: SidebarItem?
 
     var body: some View {
@@ -16,6 +19,14 @@ struct SidebarView: View {
                 Label("所有歌曲", systemImage: "music.note.list")
                     .badge(library.tracks.count)
                     .tag(SidebarItem.allTracks)
+
+                Label("我喜欢的音乐", systemImage: "heart.fill")
+                    .badge(activity.favoriteIDs.count)
+                    .tag(SidebarItem.favorites)
+
+                Label("最近播放", systemImage: "clock.arrow.circlepath")
+                    .badge(activity.recentEntries.count)
+                    .tag(SidebarItem.recent)
             }
 
             Section("文件夹") {

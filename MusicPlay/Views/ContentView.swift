@@ -4,36 +4,83 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var player: PlayerEngine
+    @EnvironmentObject private var activity: LibraryActivityStore
 
     @State private var selection: SidebarItem? = .allTracks
     @State private var searchText = ""
     @State private var isDropTargeted = false
+    @State private var showLyrics = true
     @State private var keyMonitor: Any?
+    @AppStorage(TrackSortStorage.optionKey) private var sortOptionRaw = TrackSortOption.title.rawValue
+    @AppStorage(TrackSortStorage.ascendingKey) private var sortAscending = true
+
+    private var sort: TrackSort {
+        TrackSort(option: TrackSortOption(rawValue: sortOptionRaw) ?? .title, ascending: sortAscending)
+    }
+
+    private var sortBinding: Binding<TrackSort> {
+        Binding(
+            get: { sort },
+            set: { newValue in
+                sortOptionRaw = newValue.option.rawValue
+                sortAscending = newValue.ascending
+            }
+        )
+    }
+
+    private var isRecentList: Bool {
+        selection == .recent
+    }
 
     private var visibleTracks: [Track] {
-        var result = library.tracks
+        var result: [Track]
 
-        if case .folder(let folder)? = selection {
-            result = result.filter { $0.isInside(folder: folder) }
+        switch selection {
+        case .favorites:
+            result = library.tracks.filter { activity.isFavorite($0) }
+        case .recent:
+            let byID = Dictionary(library.tracks.map { ($0.stableID, $0) }, uniquingKeysWith: { first, _ in first })
+            result = activity.recentTrackIDs.compactMap { byID[$0] }
+        case .folder(let folder)?:
+            result = library.tracks.filter { $0.isInside(folder: folder) }
+        case .allTracks?, nil:
+            result = library.tracks
         }
 
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !query.isEmpty {
-            result = result.filter { track in
-                track.title.localizedCaseInsensitiveContains(query)
-                    || track.artist.localizedCaseInsensitiveContains(query)
-                    || track.album.localizedCaseInsensitiveContains(query)
-            }
+            result = result.filter { TrackSearch.matches($0, query: query) }
         }
 
-        return result
+        // 最近播放保持时间倒序，其余视图按当前排序方式排列。
+        if isRecentList {
+            return result
+        }
+        return TrackSorter.sorted(result, by: sort)
     }
 
     private var title: String {
-        if case .folder(let folder)? = selection {
+        switch selection {
+        case .favorites:
+            return "我喜欢的音乐"
+        case .recent:
+            return "最近播放"
+        case .folder(let folder)?:
             return folder.lastPathComponent
+        case .allTracks?, nil:
+            return "所有歌曲"
         }
-        return "所有歌曲"
+    }
+
+    private var emptyDescription: (icon: String, title: String, message: String) {
+        switch selection {
+        case .favorites:
+            return ("heart", "还没有喜欢的歌曲", "点歌曲右侧的爱心，或右键选择“喜欢”，就会收藏到这里。")
+        case .recent:
+            return ("clock.arrow.circlepath", "还没有播放记录", "播放过的歌曲会按时间顺序出现在这里。")
+        default:
+            return ("music.note", "这里还没有歌曲", "换一个文件夹，或点击右上角重新扫描资料库。")
+        }
     }
 
     private var hasActiveSearch: Bool {
@@ -41,25 +88,46 @@ struct ContentView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        let displayedTracks = visibleTracks
+
+        return VStack(spacing: 0) {
             NavigationSplitView {
                 SidebarView(selection: $selection)
             } detail: {
                 TrackListView(
                     title: title,
-                    tracks: visibleTracks,
+                    tracks: displayedTracks,
                     isScanning: library.isScanning,
                     isLibraryEmpty: library.folders.isEmpty,
                     hasActiveSearch: hasActiveSearch,
                     searchText: $searchText,
+                    sort: sortBinding,
+                    allowsSorting: !isRecentList,
+                    favoriteIDs: activity.favoriteIDs,
+                    currentTrackID: player.currentTrack?.id,
+                    isPlaying: player.isPlaying,
+                    emptyIcon: emptyDescription.icon,
+                    emptyTitle: emptyDescription.title,
+                    emptyMessage: emptyDescription.message,
                     onPlay: { track in
-                        player.play(track, in: visibleTracks)
+                        player.play(track, in: displayedTracks)
+                    },
+                    onToggleFavorite: { track in
+                        activity.toggleFavorite(track)
                     }
                 )
+                .equatable()
             }
             .navigationSplitViewStyle(.balanced)
+            .inspector(isPresented: $showLyrics) {
+                LyricsPane()
+                    .inspectorColumnWidth(min: 280, ideal: 340, max: 480)
+            }
 
-            PlayerBar(fallbackQueue: visibleTracks.isEmpty ? library.tracks : visibleTracks)
+            PlayerBar(
+                fallbackQueue: displayedTracks.isEmpty ? library.tracks : displayedTracks,
+                showLyrics: $showLyrics
+            )
         }
         .dropDestination(for: URL.self) { urls, _ in
             library.addFolders(urls)

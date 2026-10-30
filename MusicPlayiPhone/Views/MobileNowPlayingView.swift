@@ -1,12 +1,21 @@
+import Combine
 import SwiftUI
 import UIKit
 
 struct MobileNowPlayingView: View {
     @EnvironmentObject private var player: PlayerEngine
+    @EnvironmentObject private var lyricsLibrary: LyricsLibrary
+    @EnvironmentObject private var activity: LibraryActivityStore
+    @EnvironmentObject private var lyricsOffsets: LyricsOffsetStore
     @Environment(\.dismiss) private var dismiss
 
     @State private var scrubTime: Double?
     @State private var backdrop: UIImage?
+    @State private var showLyrics = false
+    @State private var lyrics: Lyrics?
+    @State private var isLoadingLyrics = false
+    @State private var swipeOffset: CGFloat = 0
+    @AppStorage("lyricsFontScale") private var fontScale = 1.0
 
     private var maxDuration: Double {
         max(player.duration, 0.01)
@@ -14,6 +23,14 @@ struct MobileNowPlayingView: View {
 
     private var displayedTime: Double {
         scrubTime ?? player.currentTime
+    }
+
+    private var offset: Double {
+        lyricsOffsets.offset(for: player.currentTrack)
+    }
+
+    private var isFavorite: Bool {
+        player.currentTrack.map { activity.isFavorite($0) } ?? false
     }
 
     private var subtitle: String {
@@ -33,16 +50,31 @@ struct MobileNowPlayingView: View {
                 VStack(spacing: 0) {
                     header
 
-                    Spacer(minLength: 12)
+                    if showLyrics {
+                        lyricsPanel
+                            .padding(.top, 4)
+                            .transition(.opacity)
 
-                    ArtworkView(url: player.currentTrack?.url, size: artworkSize, cornerRadius: 28)
-                        .shadow(color: .black.opacity(0.45), radius: 28, y: 18)
-                        .scaleEffect(player.isPlaying ? 1 : 0.94)
-                        .animation(.spring(response: 0.45, dampingFraction: 0.8), value: player.isPlaying)
+                        trackInfo
+                            .padding(.top, 14)
+                    } else {
+                        Spacer(minLength: 12)
 
-                    Spacer(minLength: 26)
+                        ArtworkView(url: player.currentTrack?.url, size: artworkSize, cornerRadius: 28)
+                            .shadow(color: .black.opacity(0.45), radius: 28, y: 18)
+                            .scaleEffect(player.isPlaying ? 1 : 0.94)
+                            .animation(.spring(response: 0.45, dampingFraction: 0.8), value: player.isPlaying)
+                            .onTapGesture {
+                                withAnimation(.easeInOut(duration: 0.25)) {
+                                    showLyrics = true
+                                }
+                            }
 
-                    trackInfo
+                        Spacer(minLength: 26)
+
+                        trackInfo
+                    }
+
                     progressSection
                     transportControls
 
@@ -51,6 +83,9 @@ struct MobileNowPlayingView: View {
                 .padding(.horizontal, 28)
                 .padding(.top, 6)
                 .padding(.bottom, 18)
+                .animation(.easeInOut(duration: 0.25), value: showLyrics)
+                .offset(x: swipeOffset)
+                .simultaneousGesture(swipeToDismiss(in: proxy.size))
             }
         }
         .preferredColorScheme(.dark)
@@ -61,6 +96,28 @@ struct MobileNowPlayingView: View {
             guard !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: 0.35)) {
                 backdrop = image
+            }
+        }
+        .task(id: player.currentTrack?.id) {
+            lyrics = nil
+            guard let track = player.currentTrack else { return }
+            isLoadingLyrics = true
+            let loaded = await lyricsLibrary.lyrics(for: track)
+            guard !Task.isCancelled, player.currentTrack?.id == track.id else { return }
+            lyrics = loaded
+            isLoadingLyrics = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .artworkUpdated)) { notification in
+            guard backdrop == nil,
+                  let path = notification.object as? String,
+                  path == player.currentTrack?.id,
+                  let url = player.currentTrack?.url else { return }
+            Task {
+                let image = await ArtworkCache.shared.artwork(for: url)
+                guard !Task.isCancelled, player.currentTrack?.id == path else { return }
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    backdrop = image
+                }
             }
         }
     }
@@ -97,46 +154,172 @@ struct MobileNowPlayingView: View {
     }
 
     private var header: some View {
-        HStack {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 38, height: 38)
-                    .background(Circle().fill(.white.opacity(0.12)))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("关闭播放页")
-
-            Spacer()
-
-            Text("正在播放")
+        ZStack {
+            Text(showLyrics ? "歌词" : "正在播放")
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.6))
 
-            Spacer()
+            HStack {
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 38, height: 38)
+                        .background(Circle().fill(.white.opacity(0.12)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("关闭播放页")
 
-            Color.clear
-                .frame(width: 38, height: 38)
+                Spacer()
+
+                HStack(spacing: 8) {
+                    if showLyrics, lyrics != nil {
+                        lyricsMenu
+                            .transition(.opacity)
+                    }
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            showLyrics.toggle()
+                        }
+                    } label: {
+                        Image(systemName: showLyrics ? "photo" : "quote.bubble")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 38, height: 38)
+                            .background(Circle().fill(.white.opacity(0.12)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(showLyrics ? "显示封面" : "显示歌词")
+                }
+            }
         }
+        .animation(.easeInOut(duration: 0.2), value: showLyrics)
+    }
+
+    private var lyricsMenu: some View {
+        Menu {
+            if lyrics?.isTimed == true {
+                Section("歌词偏移 \(lyricsOffsetLabel(offset))") {
+                    Button {
+                        lyricsOffsets.adjust(for: player.currentTrack, by: -0.5)
+                    } label: {
+                        Label("提前 0.5 秒", systemImage: "minus.circle")
+                    }
+                    Button {
+                        lyricsOffsets.adjust(for: player.currentTrack, by: 0.5)
+                    } label: {
+                        Label("延后 0.5 秒", systemImage: "plus.circle")
+                    }
+                    Button {
+                        lyricsOffsets.reset(for: player.currentTrack)
+                    } label: {
+                        Label("偏移归零", systemImage: "arrow.counterclockwise")
+                    }
+                    .disabled(offset == 0)
+                }
+            }
+
+            Section("歌词字体") {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        fontScale = max(0.8, fontScale - 0.1)
+                    }
+                } label: {
+                    Label("小一点", systemImage: "textformat.size.smaller")
+                }
+                .disabled(fontScale <= 0.8)
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        fontScale = min(1.4, fontScale + 0.1)
+                    }
+                } label: {
+                    Label("大一点", systemImage: "textformat.size.larger")
+                }
+                .disabled(fontScale >= 1.4)
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        fontScale = 1
+                    }
+                } label: {
+                    Label("默认大小", systemImage: "textformat.size")
+                }
+                .disabled(abs(fontScale - 1) < 0.01)
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 38, height: 38)
+                .background(Circle().fill(.white.opacity(0.12)))
+                .overlay(alignment: .topTrailing) {
+                    if offset != 0 {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 7, height: 7)
+                            .offset(x: -1, y: 1)
+                    }
+                }
+        }
+        .accessibilityLabel("歌词设置")
+    }
+
+    private var lyricsPanel: some View {
+        SyncedLyricsView(
+            lyrics: lyrics,
+            isLoading: isLoadingLyrics,
+            currentTime: player.currentTime - offset,
+            tintColor: .white,
+            baseColor: .white.opacity(0.7),
+            lineFontSize: CGFloat(17 * fontScale),
+            contentHorizontalPadding: 0,
+            onSeek: { time in player.seek(to: max(time + offset, 0)) },
+            emptyText: "没有找到这首歌的歌词"
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var trackInfo: some View {
-        VStack(spacing: 7) {
-            Text(player.currentTrack?.title ?? "未在播放")
-                .font(.title2.weight(.bold))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .minimumScaleFactor(0.65)
+        ZStack(alignment: .trailing) {
+            VStack(spacing: 7) {
+                Text(player.currentTrack?.title ?? "未在播放")
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
 
-            Text(subtitle)
-                .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.65))
-                .lineLimit(1)
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.65))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 52)
+
+            favoriteButton
         }
-        .frame(maxWidth: .infinity)
+    }
+
+    private var favoriteButton: some View {
+        Button {
+            guard let track = player.currentTrack else { return }
+            activity.toggleFavorite(track)
+        } label: {
+            Image(systemName: isFavorite ? "heart.fill" : "heart")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(isFavorite ? Color.pink : Color.white.opacity(0.9))
+                .frame(width: 44, height: 44)
+                .background(Circle().fill(.white.opacity(0.12)))
+                .contentShape(Circle())
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(.plain)
+        .disabled(player.currentTrack == nil)
+        .accessibilityLabel(isFavorite ? "取消喜欢" : "喜欢")
     }
 
     private var progressSection: some View {
@@ -258,5 +441,41 @@ struct MobileNowPlayingView: View {
         case .all: player.repeatMode = .one
         case .one: player.repeatMode = .off
         }
+    }
+
+    private func swipeToDismiss(in size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 20)
+            .onChanged { value in
+                guard isHorizontalDismissDrag(value, in: size) else { return }
+                swipeOffset = value.translation.width
+            }
+            .onEnded { value in
+                guard isHorizontalDismissDrag(value, in: size) else {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                        swipeOffset = 0
+                    }
+                    return
+                }
+                let passed = abs(value.translation.width) > 90
+                    || abs(value.predictedEndTranslation.width) > 180
+                if passed {
+                    let direction: CGFloat = value.translation.width < 0 ? -1 : 1
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        swipeOffset = direction * size.width
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                        dismiss()
+                    }
+                } else {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                        swipeOffset = 0
+                    }
+                }
+            }
+    }
+
+    private func isHorizontalDismissDrag(_ value: DragGesture.Value, in size: CGSize) -> Bool {
+        guard value.startLocation.y < size.height * 0.67 else { return false }
+        return abs(value.translation.width) > abs(value.translation.height) * 1.2
     }
 }

@@ -15,6 +15,10 @@ final class LibraryStore: ObservableObject {
 
     private var needsRescan = false
     private let cacheURL: URL
+    private var cachedMetadataVersion = 0
+
+    // 变更元数据解析逻辑时递增，旧缓存里的曲目会重新读取标签
+    private static let metadataSchemaVersion = 3
 
     init() {
         let supportDirectory = FileManager.default
@@ -103,6 +107,7 @@ final class LibraryStore: ObservableObject {
         }
 
         let cachedByPath = Dictionary(tracks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let needsMetadataRefresh = cachedMetadataVersion < Self.metadataSchemaVersion
         let foldersSnapshot = folders
         let discovered = await Task.detached(priority: .userInitiated) {
             Self.discoverAudioFiles(in: foldersSnapshot)
@@ -116,15 +121,16 @@ final class LibraryStore: ObservableObject {
         }
         tracks = Self.sorted(scanned)
 
-        let uncached = scanned.filter { cachedByPath[$0.id] == nil }
+        let uncached = needsMetadataRefresh ? scanned : scanned.filter { cachedByPath[$0.id] == nil }
         if !uncached.isEmpty {
             let metadata = await loadMetadata(for: uncached)
             scanned = scanned.map { track in
                 guard let meta = metadata[track.id] else { return track }
                 var updated = track
-                if let title = meta.title, !title.isEmpty { updated.title = title }
-                if let artist = meta.artist, !artist.isEmpty { updated.artist = artist }
-                if let album = meta.album, !album.isEmpty { updated.album = album }
+                let fallbackTitle = track.url.deletingPathExtension().lastPathComponent
+                updated.title = meta.title ?? fallbackTitle
+                updated.artist = meta.artist ?? ""
+                updated.album = meta.album ?? ""
                 if meta.duration > 0 { updated.duration = meta.duration }
                 return updated
             }
@@ -133,7 +139,11 @@ final class LibraryStore: ObservableObject {
             })
         }
 
+        if needsMetadataRefresh {
+            cachedMetadataVersion = Self.metadataSchemaVersion
+        }
         persist()
+        OnlineArtworkStore.shared.start(tracks: tracks)
     }
 
     private func loadMetadata(for tracks: [Track]) async -> [String: LoadedMetadata] {
@@ -194,6 +204,7 @@ final class LibraryStore: ObservableObject {
     private struct LibraryCache: Codable {
         var folders: [URL]
         var tracks: [Track]
+        var metadataVersion: Int?
     }
 
     private func loadCache() {
@@ -201,10 +212,11 @@ final class LibraryStore: ObservableObject {
               let cache = try? JSONDecoder().decode(LibraryCache.self, from: data) else { return }
         folders = cache.folders
         tracks = cache.tracks
+        cachedMetadataVersion = cache.metadataVersion ?? 0
     }
 
     private func persist() {
-        let cache = LibraryCache(folders: folders, tracks: tracks)
+        let cache = LibraryCache(folders: folders, tracks: tracks, metadataVersion: cachedMetadataVersion)
         guard let data = try? JSONEncoder().encode(cache) else { return }
         try? data.write(to: cacheURL, options: .atomic)
     }
@@ -270,21 +282,47 @@ final class LibraryStore: ObservableObject {
                 ) else { continue }
 
                 for case let fileURL as URL in enumerator {
-                    if copyFile(fileURL, to: destination) {
-                        copied += 1
+                    if Track.supportedExtensions.contains(fileURL.pathExtension.lowercased()) {
+                        if copyFile(fileURL, to: destination) != nil {
+                            copied += 1
+                        }
+                    } else if isLyricFile(fileURL) {
+                        copyFile(fileURL, to: destination)
                     }
                 }
-            } else if copyFile(url, to: destination) {
+            } else if let target = copyFile(url, to: destination) {
                 copied += 1
+                copySiblingLyrics(for: url, renamedTo: target)
             }
         }
 
         return copied
     }
 
-    nonisolated private static func copyFile(_ source: URL, to destination: URL) -> Bool {
+    nonisolated private static func isLyricFile(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        guard ext == "lrc" || ext == "krc" else { return false }
+        return !url.lastPathComponent.hasPrefix("._")
+    }
+
+    nonisolated private static func copySiblingLyrics(for audioURL: URL, renamedTo target: URL) {
+        let folder = audioURL.deletingLastPathComponent()
+        let stem = audioURL.deletingPathExtension().lastPathComponent
+        guard let contents = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return }
+
+        for file in contents where isLyricFile(file) {
+            let lyricStem = file.deletingPathExtension().lastPathComponent
+            guard lyricStem.localizedCaseInsensitiveCompare(stem) == .orderedSame else { continue }
+            let lyricTarget = target.deletingPathExtension().appendingPathExtension(file.pathExtension.lowercased())
+            guard !FileManager.default.fileExists(atPath: lyricTarget.path) else { continue }
+            try? FileManager.default.copyItem(at: file, to: lyricTarget)
+        }
+    }
+
+    nonisolated private static func copyFile(_ source: URL, to destination: URL) -> URL? {
         let fileManager = FileManager.default
-        guard Track.supportedExtensions.contains(source.pathExtension.lowercased()) else { return false }
+        guard Track.supportedExtensions.contains(source.pathExtension.lowercased())
+                || isLyricFile(source) else { return nil }
 
         let base = source.deletingPathExtension().lastPathComponent
         let ext = source.pathExtension
@@ -297,9 +335,9 @@ final class LibraryStore: ObservableObject {
 
         do {
             try fileManager.copyItem(at: source, to: target)
-            return true
+            return target
         } catch {
-            return false
+            return nil
         }
     }
     #endif
